@@ -134,6 +134,8 @@ namespace hc09::vk
         static const std::pair<const wchar_t*, const char*> kSettings[] = {
             { L"FrameRate", "HC09_FRAMERATE" }, { L"Scale", "HC09_SCALE" },       { L"VSync", "HC09_VSYNC" },
             { L"Fullscreen", "HC09_FULLSCREEN" }, { L"MSAA", "HC09_NATIVE_MSAA" }, { L"GPU", "HC09_GPU" },
+            { L"Sharpen", "HC09_SHARPEN" },     { L"Contrast", "HC09_CONTRAST" }, { L"Saturation", "HC09_SATURATION" },
+            { L"Warmth", "HC09_WARMTH" },       { L"Vignette", "HC09_VIGNETTE" },
         };
         const std::wstring file = (std::filesystem::current_path() / L"hc09.ini").wstring();
         for (const auto& [key, variable] : kSettings)

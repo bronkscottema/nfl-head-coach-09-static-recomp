@@ -1756,6 +1756,7 @@ layout(push_constant) uniform NativeResolveConsts {
     uint destBytes, endian, swapRB; float destScale;
     uint samples, sampleSel, scale, scaledRows;
     uint scaled, scaledPitch; int destX, destY;
+    uint grade; float sharpen, contrast, saturation, warmth, vignette, invW, invH;
 } R;
 layout(std430, set = 0, binding = 3) buffer ScaledCopy { uint smem[]; };
 )GLSL";
@@ -1806,6 +1807,41 @@ uint packWord(vec4 c)   // a 4-byte destination's word, as main() packs the gues
     return swapWord(packResolve(R.destFmt, R.srcFmt, d).x, R.endian, 4u);
 }
 #endif
+#ifdef XE_MS
+#ifndef XE_DEPTH
+// The colour grade (R.grade != 0): the selected samples of source texel q; then the grade of c at q
+// with its neighbours `step` texels away, `uv` the position on the screen (0..1).
+vec3 gradeTexel(ivec2 q, uint first, uint count)
+{
+    q = clamp(q, ivec2(0), textureSize(srcColor) - 1);
+    vec3 t = vec3(0.0);
+    for (uint k = first; k < first + count; ++k) t += texelFetch(srcColor, q, int(k)).rgb;
+    return t / float(count);
+}
+vec4 gradeColor(vec4 o, ivec2 q, int step, vec2 uv, uint first, uint count)
+{
+    vec3 c = clamp(o.rgb, 0.0, 1.0);
+    if (R.sharpen > 0.0)
+    {
+        vec3 n = gradeTexel(q + ivec2(0, -step), first, count), w = gradeTexel(q + ivec2(-step, 0), first, count);
+        vec3 e = gradeTexel(q + ivec2(step, 0), first, count), s = gradeTexel(q + ivec2(0, step), first, count);
+        vec3 lo = min(c, min(min(n, w), min(e, s)));
+        vec3 hi = max(c, max(max(n, w), max(e, s)));
+        vec3 amount = sqrt(clamp(min(lo, 1.0 - hi) / max(hi, vec3(1e-4)), 0.0, 1.0));
+        vec3 weight = -amount * mix(0.08, 0.2, clamp(R.sharpen, 0.0, 1.0));
+        c = clamp((c + (n + w + e + s) * weight) / (1.0 + 4.0 * weight), 0.0, 1.0);
+    }
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = max(mix(vec3(l), c, R.saturation), 0.0);
+    vec3 curve = c * c * (3.0 - 2.0 * c);
+    c = R.contrast >= 1.0 ? mix(c, curve, clamp((R.contrast - 1.0) * 2.0, 0.0, 1.0)) : 0.5 + (c - 0.5) * R.contrast;
+    c *= vec3(1.0 + R.warmth * 0.06, 1.0 + R.warmth * 0.01, 1.0 - R.warmth * 0.06);
+    vec2 off = uv - 0.5;
+    c *= 1.0 - R.vignette * dot(off, off) * 1.6;
+    return vec4(clamp(c, 0.0, 1.0), o.a);
+}
+#endif
+#endif
 void main()
 {
     uvec2 id = gl_GlobalInvocationID.xy;
@@ -1846,8 +1882,15 @@ void main()
                 c += t / nb;
                 cs += t / float(count);
             }
-            if (R.scaled != 0u) writeScaled(x * S + i, y * S + j, packWord(cs));
+            if (R.scaled != 0u)
+            {
+                if (R.grade != 0u)
+                    cs = gradeColor(cs, ivec2(x * S + i, y * S + j), 1,
+                                    (vec2(x, y) + (vec2(i, j) + 0.5) / float(S)) * vec2(R.invW, R.invH), first, count);
+                writeScaled(x * S + i, y * S + j, packWord(cs));
+            }
         }
+    if (R.grade != 0u) c = gradeColor(c, ivec2(x * S + S / 2u, y * S + S / 2u), int(S), (vec2(x, y) + 0.5) * vec2(R.invW, R.invH), first, count);
 #else
     precise vec4 c = texelFetch(srcColor, ivec2(x * S, y * S), 0);
     if (S > 1u)
