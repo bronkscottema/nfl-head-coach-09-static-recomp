@@ -25,6 +25,8 @@ namespace hc09::gpu
             float up[3], radius;
             float occlusion, reflections, debug, pad0;
             float blurDirection[2], pad1[2];
+            float sharpen, contrast, saturation, warmth;
+            float vignette, pad2[3];
         };
         constexpr uint32_t kConstantDwords = sizeof(Constants) / 4;
 
@@ -46,6 +48,12 @@ cbuffer Effects : register(b0)
     float pad0;
     float2 blurDirection;
     float2 pad1;
+    float sharpenStrength;
+    float contrast;
+    float saturation;
+    float warmth;
+    float vignette;
+    float3 pad2;
 };
 
 #if MSAA
@@ -263,6 +271,42 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
     sum /= weights;
     return debugView == 2.0 ? float4(sum.rgb, 1.0) : sum;
 }
+
+// The finished scene (input0, a copy) sharpened and graded, written back over it.
+// Sharpening is contrast-adaptive (after AMD's FidelityFX CAS): each pixel is pushed away from
+// its four neighbours by an amount that shrinks where the neighbourhood is already high-contrast,
+// so edges get crisper without halos or noise. Then the grade: saturation around the pixel's
+// luminance, contrast as a blend towards an S-curve (no clipping at either end), white balance
+// (warmth > 0 warmer, < 0 cooler) and an optional vignette.
+float3 Texel(int2 p)
+{
+    return input0.Load(int3(clamp(p, int2(0, 0), int2(size) - 1), 0)).rgb;
+}
+
+float4 ps_grade(float4 position : SV_Position) : SV_Target
+{
+    int2 p = int2(position.xy);
+    float4 original = input0.Load(int3(p, 0));
+    float3 c = original.rgb;
+    if (sharpenStrength > 0.0)
+    {
+        float3 n = Texel(p + int2(0, -1)), w = Texel(p + int2(-1, 0)), e = Texel(p + int2(1, 0)), s = Texel(p + int2(0, 1));
+        float3 lo = min(c, min(min(n, w), min(e, s)));
+        float3 hi = max(c, max(max(n, w), max(e, s)));
+        float3 amount = sqrt(saturate(min(lo, 1.0 - hi) / max(hi, 1e-4)));
+        float3 weight = -amount * lerp(0.08, 0.2, saturate(sharpenStrength));
+        c = saturate((c + (n + w + e + s) * weight) / (1.0 + 4.0 * weight));
+    }
+    float luminance = dot(c, float3(0.2126, 0.7152, 0.0722));
+    c = max(lerp(luminance.xxx, c, saturation), 0.0);
+    float3 curve = c * c * (3.0 - 2.0 * c);
+    c = contrast >= 1.0 ? lerp(c, curve, saturate((contrast - 1.0) * 2.0))
+                        : lerp(c, 0.5 + (c - 0.5) * contrast, 1.0);
+    c *= float3(1.0 + warmth * 0.06, 1.0 + warmth * 0.01, 1.0 - warmth * 0.06);
+    float2 offset = position.xy * invSize - 0.5;
+    c *= 1.0 - vignette * dot(offset, offset) * 1.6;
+    return float4(saturate(c), original.a);
+}
 )";
 
         void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource, D3D12_RESOURCE_STATES& state, D3D12_RESOURCE_STATES after)
@@ -284,16 +328,22 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
         constexpr DXGI_FORMAT kOcclusionFormat = DXGI_FORMAT_R16G16_FLOAT;  // occlusion, view distance
         constexpr DXGI_FORMAT kReflectionFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // premultiplied colour, opacity
 
-        // A strength from hc09.ini [Graphics] <key>, overridden by an environment variable.
-        float Strength(const wchar_t* key, const char* variable, float fallback)
+        // A value from hc09.ini [Graphics] <key>, overridden by an environment variable.
+        float Setting(const wchar_t* key, const char* variable, float fallback)
         {
             if (const char* value = std::getenv(variable))
-                return std::max(0.0f, float(std::atof(value)));
+                return float(std::atof(value));
             wchar_t text[32] = {};
             const std::wstring file = (std::filesystem::current_path() / L"hc09.ini").wstring();
             if (GetPrivateProfileStringW(L"Graphics", key, L"", text, DWORD(std::size(text)), file.c_str()) == 0)
                 return fallback;
-            return std::max(0.0f, float(std::wcstod(text, nullptr)));
+            return float(std::wcstod(text, nullptr));
+        }
+
+        // A strength (0 turns the effect off).
+        float Strength(const wchar_t* key, const char* variable, float fallback)
+        {
+            return std::max(0.0f, Setting(key, variable, fallback));
         }
     }
 
@@ -345,13 +395,20 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
         context_ = &context;
         occlusion_ = Strength(L"AmbientOcclusion", "HC09_SSAO", 1.0f);
         reflections_ = Strength(L"Reflections", "HC09_SSR", 1.0f);
+        sharpen_ = std::min(Strength(L"Sharpen", "HC09_SHARPEN", 0.5f), 1.0f);
+        contrast_ = Strength(L"Contrast", "HC09_CONTRAST", 1.1f);
+        saturation_ = Strength(L"Saturation", "HC09_SATURATION", 1.1f);
+        warmth_ = std::clamp(Setting(L"Warmth", "HC09_WARMTH", 0.0f), -1.0f, 1.0f);
+        vignette_ = std::min(Strength(L"Vignette", "HC09_VIGNETTE", 0.0f), 1.0f);
         // HC09_EFFECTS_DEBUG=1 shows the occlusion alone, 2 the reflections alone, 3 applies both to
         // the left half of the screen only and 4 to every other scene (for comparisons).
         debug_ = std::getenv("HC09_EFFECTS_DEBUG") ? std::atoi(std::getenv("HC09_EFFECTS_DEBUG")) : 0;
-        if (debug_ == 1)
-            reflections_ = 0;
-        else if (debug_ == 2)
-            occlusion_ = 0;
+        if (debug_ == 1 || debug_ == 2)
+        {
+            (debug_ == 1 ? reflections_ : occlusion_) = 0;
+            sharpen_ = warmth_ = vignette_ = 0;
+            contrast_ = saturation_ = 1;
+        }
         if (!enabled())
             return true;
 
@@ -373,11 +430,13 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
         if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &errors)) ||
             FAILED(context.device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&rootSignature_))))
         {
-            std::fprintf(stderr, "[effects] root signature failed; ambient occlusion and reflections are off\n");
-            occlusion_ = reflections_ = 0;
+            std::fprintf(stderr, "[effects] root signature failed; scene effects are off\n");
+            occlusion_ = reflections_ = sharpen_ = warmth_ = vignette_ = 0;
+            contrast_ = saturation_ = 1;
             return false;
         }
-        std::fprintf(stderr, "[effects] ambient occlusion %.2f, reflections %.2f\n", occlusion_, reflections_);
+        std::fprintf(stderr, "[effects] ambient occlusion %.2f, reflections %.2f, sharpen %.2f, contrast %.2f, saturation %.2f, "
+            "warmth %.2f, vignette %.2f\n", occlusion_, reflections_, sharpen_, contrast_, saturation_, warmth_, vignette_);
         return true;
     }
 
@@ -433,7 +492,8 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
             !create("ps_blur", kOcclusionFormat, 1, 0, pipelines.blur) ||
             !create("ps_composite", format, samples, debug_ == 1 ? 0 : 1, pipelines.composite) ||
             !create("ps_reflections", kReflectionFormat, 1, 0, pipelines.reflections) ||
-            !create("ps_reflection_composite", format, samples, debug_ == 2 ? 0 : 2, pipelines.reflectionComposite))
+            !create("ps_reflection_composite", format, samples, debug_ == 2 ? 0 : 2, pipelines.reflectionComposite) ||
+            !create("ps_grade", format, samples, 0, pipelines.grade))
         {
             std::fprintf(stderr, "[effects] pipelines for format %d x%u failed; no effects on that target\n", int(format), samples);
             pipelines = {};
@@ -525,11 +585,14 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
         if (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_R10G10B10A2_UNORM && format != DXGI_FORMAT_R16G16B16A16_FLOAT)
             return;
         Pipelines* pipelines = GetPipelines(format, samples);
+        // The grade works on display colours (0-1): not on a floating-point scene, whose values
+        // above 1 may still be on their way to the game's own tone mapping.
+        const bool grade = grading() && format != DXGI_FORMAT_R16G16B16A16_FLOAT;
         // The blurred occlusion target is also the (unread) third view of the reflection passes.
         if (!pipelines || !Prepare(occlusionBlurred_, kOcclusionFormat, width, height, true) ||
             (occlusion_ > 0 && !Prepare(occlusionRaw_, kOcclusionFormat, width, height, true)) ||
-            (reflections_ > 0 && (!Prepare(sceneCopy_, format, width, height, false) ||
-                !Prepare(reflectionTarget_, kReflectionFormat, width, height, true))))
+            ((reflections_ > 0 || grade) && !Prepare(sceneCopy_, format, width, height, false)) ||
+            (reflections_ > 0 && !Prepare(reflectionTarget_, kReflectionFormat, width, height, true)))
             return;
 
         Constants constants{};
@@ -550,6 +613,11 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
         constants.occlusion = std::min(occlusion_, 1.0f);
         constants.reflections = reflections_;
         constants.debug = float(debug_);
+        constants.sharpen = sharpen_;
+        constants.contrast = contrast_;
+        constants.saturation = saturation_;
+        constants.warmth = warmth_;
+        constants.vignette = vignette_;
         if (!loggedCamera_)
         {
             loggedCamera_ = true;
@@ -579,8 +647,8 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
             Pass(pipelines->composite.Get(), colorRtv, depth, samples, occlusionBlurred_.resource.Get(), kOcclusionFormat,
                 occlusionBlurred_.resource.Get(), &constants, width, height);
         }
-        if (reflections_ > 0)
-        {
+        // A single-sampled copy of the scene as it stands, for passes that read it.
+        auto copyScene = [&] {
             if (samples > 1)
             {
                 Transition(list, color, colorState, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
@@ -594,6 +662,10 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
                 list->CopyResource(sceneCopy_.resource.Get(), color);
             }
             Transition(list, sceneCopy_.resource.Get(), sceneCopy_.state, kReadable);
+        };
+        if (reflections_ > 0)
+        {
+            copyScene();
             Transition(list, occlusionBlurred_.resource.Get(), occlusionBlurred_.state, kReadable);
             Transition(list, reflectionTarget_.resource.Get(), reflectionTarget_.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
             Pass(pipelines->reflections.Get(), reflectionTarget_.rtv, depth, samples, sceneCopy_.resource.Get(), format,
@@ -601,6 +673,14 @@ float4 ps_reflection_composite(float4 position : SV_Position) : SV_Target
             Transition(list, reflectionTarget_.resource.Get(), reflectionTarget_.state, kReadable);
             Transition(list, color, colorState, D3D12_RESOURCE_STATE_RENDER_TARGET);
             Pass(pipelines->reflectionComposite.Get(), colorRtv, depth, samples, reflectionTarget_.resource.Get(), kReflectionFormat,
+                occlusionBlurred_.resource.Get(), &constants, width, height);
+        }
+        if (grade)
+        {
+            copyScene();
+            Transition(list, occlusionBlurred_.resource.Get(), occlusionBlurred_.state, kReadable);
+            Transition(list, color, colorState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            Pass(pipelines->grade.Get(), colorRtv, depth, samples, sceneCopy_.resource.Get(), format,
                 occlusionBlurred_.resource.Get(), &constants, width, height);
         }
         Transition(list, color, colorState, colorBefore);
