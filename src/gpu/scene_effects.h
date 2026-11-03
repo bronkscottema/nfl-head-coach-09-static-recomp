@@ -1,6 +1,7 @@
 #pragma once
 
-// Screen-space ambient occlusion and reflections for the game's 3D scenes.
+// Screen-space ambient occlusion and reflections for the game's 3D scenes, then sharpening and a
+// colour grade.
 //
 // The 3D scene of a frame is the predicated-tiling pass: its first pass draws the whole scene
 // into a multisampled colour target and depth buffer, before the interface is drawn into other
@@ -14,7 +15,9 @@
 // distance, the field of view, and the world's up direction in view space.
 //
 // Settings: hc09.ini [Graphics] AmbientOcclusion and Reflections (strength, 0 turns it off),
-// overridden by HC09_SSAO and HC09_SSR.
+// overridden by HC09_SSAO and HC09_SSR; Sharpen (0-1), Contrast and Saturation (1 leaves them),
+// Warmth (-1 cooler to 1 warmer) and Vignette (0-1), overridden by HC09_SHARPEN, HC09_CONTRAST,
+// HC09_SATURATION, HC09_WARMTH and HC09_VIGNETTE.
 
 #include <cstdint>
 #include <utility>
@@ -42,7 +45,11 @@ namespace hc09::gpu
     {
     public:
         bool Initialize(D3D12Context& context);
-        bool enabled() const { return occlusion_ > 0 || reflections_ > 0; }
+        bool enabled() const { return occlusion_ > 0 || reflections_ > 0 || grading(); }
+        bool grading() const
+        {
+            return sharpen_ > 0 || contrast_ != 1 || saturation_ != 1 || warmth_ != 0 || vignette_ > 0;
+        }
 
         // Applies the effects to a scene's colour target and depth buffer (width x height pixels,
         // `samples` per pixel). Both are left in the states they came in.
@@ -53,7 +60,7 @@ namespace hc09::gpu
     private:
         struct Pipelines
         {
-            ComPtr<ID3D12PipelineState> occlusion, blur, composite, reflections, reflectionComposite;
+            ComPtr<ID3D12PipelineState> occlusion, blur, composite, reflections, reflectionComposite, grade;
         };
         struct Target
         {
@@ -70,6 +77,7 @@ namespace hc09::gpu
 
         D3D12Context* context_ = nullptr;
         float occlusion_ = 0, reflections_ = 0;
+        float sharpen_ = 0, contrast_ = 1, saturation_ = 1, warmth_ = 0, vignette_ = 0;
         int debug_ = 0;
         bool loggedCamera_ = false;
         uint32_t applied_ = 0;

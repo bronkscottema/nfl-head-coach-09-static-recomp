@@ -129,6 +129,27 @@ Reflections=1
 
 `set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run.
 
+In the D3D12 renderer, the finished 3D scene is then sharpened and colour graded, before the interface is drawn over it
+(menus and the score bug are left as they are). Sharpening is contrast-adaptive (after AMD's
+FidelityFX CAS): it brings out the detail of the 2008 textures without halos, and pairs well
+with `HC09_RESOLUTION_SCALE`. The grade gives the picture a modern broadcast look: a little more
+saturation and an S-curve of contrast that deepens the shadows and brightens the highlights
+without clipping either. The defaults, in `hc09.ini`:
+
+```ini
+[Graphics]
+Sharpen=0.5      ; 0 (off) to 1
+Contrast=1.1     ; 1 leaves the contrast as it is, up to about 1.5 for a strong curve
+Saturation=1.1   ; 1 leaves it, 0 is black and white
+Warmth=0         ; -1 (cooler) to 1 (warmer)
+Vignette=0       ; 0 (off) to 1: darkens the corners
+```
+
+`set HC09_SHARPEN=`, `HC09_CONTRAST=`, `HC09_SATURATION=`, `HC09_WARMTH=` and `HC09_VIGNETTE=`
+override them for one run, and `set HC09_EFFECTS_DEBUG=3` applies every effect to the left half
+of the screen only, for a side-by-side comparison. Sharpen 0 with contrast and saturation 1 turns
+the grade off.
+
 ### Renderers: Vulkan (60 fps, 1440p) and D3D12
 
 The game is drawn by a renderer built on Vulkan (it comes from the NFL Head Coach 09 for PC
