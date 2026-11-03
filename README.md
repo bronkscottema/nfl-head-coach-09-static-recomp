@@ -129,7 +129,7 @@ Reflections=1
 
 `set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run.
 
-In the D3D12 renderer, the finished 3D scene is then sharpened and colour graded, before the interface is drawn over it
+In both renderers, the finished 3D scene is then sharpened and colour graded, before the interface is drawn over it
 (menus and the score bug are left as they are). Sharpening is contrast-adaptive (after AMD's
 FidelityFX CAS): it brings out the detail of the 2008 textures without halos, and pairs well
 with `HC09_RESOLUTION_SCALE`. The grade gives the picture a modern broadcast look: a little more
@@ -147,8 +147,10 @@ Vignette=0       ; 0 (off) to 1: darkens the corners
 
 `set HC09_SHARPEN=`, `HC09_CONTRAST=`, `HC09_SATURATION=`, `HC09_WARMTH=` and `HC09_VIGNETTE=`
 override them for one run, and `set HC09_EFFECTS_DEBUG=3` applies every effect to the left half
-of the screen only, for a side-by-side comparison. Sharpen 0 with contrast and saturation 1 turns
-the grade off.
+of the screen only, for a side-by-side comparison (D3D12 renderer only). Sharpen 0 with contrast
+and saturation 1 turns the grade off. In the Vulkan renderer the grade is applied as each 3D scene
+is resolved (its multisampled colour target, each part of it once a frame), and
+`HC09_GPU_EXACT=1` leaves it out.
 
 ### Renderers: Vulkan (60 fps, 1440p) and D3D12
 

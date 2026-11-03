@@ -415,6 +415,14 @@ struct NativeRenderer::Impl
     VkDescriptorImageInfo dummyImages[kTexKinds][32], dummyUImages[kTexKinds][32];
     bool slotTemplate = false;
     uint64_t frame = 0;
+    // The colour grade of the 3D scene (hc09.ini [Graphics] Sharpen, Contrast, Saturation, Warmth,
+    // Vignette; vk_adapter.cpp sets HC09_SHARPEN etc.): applied as multisampled colour targets (the 3D
+    // scenes) resolve, each part of a target once a frame.
+    bool grade = false;
+    float sharpen = 0.5f, contrast = 1.1f, saturation = 1.1f, warmth = 0.0f, vignette = 0.0f;
+    struct Graded { const void* target; int32_t y0, y1; };
+    std::vector<Graded> graded;
+    uint64_t gradedFrame = ~0ull;
     std::vector<std::string> warned;
     std::vector<uint32_t> idxBuf;
     std::vector<uint32_t> idxScratch;
@@ -1996,6 +2004,19 @@ struct NativeRenderer::Impl
             p.samples = uint32_t(src->samples);
             p.sampleSel = r.sampleSel;
             p.scale = scale;
+            if (grade && !which && ms && src->s.format <= 2 && r.destBytes == 4 && (r.destFmt == 6 || r.destFmt == 7))
+            {
+                if (gradedFrame != frame) { graded.clear(); gradedFrame = frame; }
+                bool again = false;
+                for (const Graded& g : graded) again |= g.target == src && r.y0 < g.y1 && g.y0 < y1;
+                if (!again)
+                {
+                    graded.push_back({ src, r.y0, y1 });
+                    p.grade = 1;
+                    p.sharpen = sharpen; p.contrast = contrast; p.saturation = saturation; p.warmth = warmth; p.vignette = vignette;
+                    p.invW = float(scale) / float(src->img.width); p.invH = float(scale) / float(src->img.height);
+                }
+            }
             if (sc)
             {
                 p.scaled = 1;
@@ -2061,6 +2082,15 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     I.trimConsts = flag(Hc09Env("HC09_NATIVE_TRIM_CONSTS"), true);
     I.indexCache = flag(Hc09Env("HC09_NATIVE_INDEX_CACHE"), true);
     I.resolveGpu = flag(Hc09Env("HC09_NATIVE_RESOLVE_GPU"), true);
+    {
+        auto setting = [](const char* e, float fallback, float lo, float hi) { return e && *e ? std::clamp(float(atof(e)), lo, hi) : fallback; };
+        I.sharpen = setting(Hc09Env("HC09_SHARPEN"), 0.5f, 0.0f, 1.0f);
+        I.contrast = setting(Hc09Env("HC09_CONTRAST"), 1.1f, 0.0f, 4.0f);
+        I.saturation = setting(Hc09Env("HC09_SATURATION"), 1.1f, 0.0f, 4.0f);
+        I.warmth = setting(Hc09Env("HC09_WARMTH"), 0.0f, -1.0f, 1.0f);
+        I.vignette = setting(Hc09Env("HC09_VIGNETTE"), 0.0f, 0.0f, 1.0f);
+        I.grade = !exact && (I.sharpen > 0.0f || I.contrast != 1.0f || I.saturation != 1.0f || I.warmth != 0.0f || I.vignette > 0.0f);
+    }
     if (I.resolveGpu &&
         !dev.CreateBuffer(0x20000000ull, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, I.vram))

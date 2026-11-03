@@ -159,6 +159,11 @@ struct NativeResolveConsts
     uint32_t samples, sampleSel, scale, scaledRows;
     uint32_t scaled, scaledPitch;
     int32_t destX, destY;
+    // The colour grade of the 3D scene (multisampled colour only; grade 0: none): sharpening,
+    // contrast, saturation, warmth and vignette, as the D3D12 renderer's scene effects.
+    uint32_t grade;
+    float sharpen, contrast, saturation, warmth, vignette;
+    float invW, invH;   // 1 / the guest surface size (the vignette)
 };
 
 // GLSL of the fixed geometry shader that expands rectangle lists (3 vertices
